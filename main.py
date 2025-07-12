@@ -5,6 +5,7 @@ from nltk.corpus import wordnet as wn
 from openpyxl import load_workbook, Workbook
 from copy import copy
 from openpyxl.cell.read_only import EmptyCell
+from collections import defaultdict
 
 # Initialize NLP tools
 stemmer = PorterStemmer()
@@ -43,63 +44,25 @@ def have_same_root(word1, word2):
 
     return False
 
-MY_WORDSHEET_PATH = "GRE Word sheet.xlsx"
-NEW_WORDSHEET_PATH = "GRE Word sheet - New.xlsx"
-HIGH_FREQUENCY_WORDS = ["aesthetic",
-"alacrity",
-"archaic",
-"ascetic",
-"assuage",
-"audacious",
-"austere",
-"banal",
-"capricious",
-"censure",
-"coalesce",
-"craven",
-"demur",
-"deride",
-"derivative",
-"diatribe",
-"didactic",
-"diffident",
-"disparate",
-"ephemeral",
-"eschew",
-"esoteric",
-"facetious",
-"fortuitous",
-"garrulous",
-"hackneyed",
-"immutable",
-"inimical",
-"innocuous",
-"insipid",
-"irascible",
-"laconic",
-"lucid",
-"malleable",
-"mercurial",
-"meticulous",
-"mitigate",
-"obsequious",
-"obstinate",
-"opaque",
-"perfunctory",
-"phlegmatic",
-"platitude",
-"pristine",
-"prodigal",
-"recondite",
-"refute",
-"repudiate",
-"reticent",
-"sedulous",
-"soporific",
-"taciturn"]
+def get_frequency_dict_from_worksheet(worksheet):
+    frequency_dict: dict[int, list[str]] = defaultdict(list)
+    
+    for word, freq in worksheet.iter_rows(min_row=2, values_only=True):  # skip header
+        if word is None or freq is None:
+            continue                                              # ignore blanks
+    
+        frequency_dict[freq].append(word)
+    frequency_dict = dict(frequency_dict)
+    return frequency_dict
 
-def row_contains_highly_frequent_word(row):
-    for word in HIGH_FREQUENCY_WORDS:
+def get_word_from_row(row):
+    word_containing_cell = row[0]  # Assuming the word is in the first column
+    if word_containing_cell.value is None:
+        return None
+    return word_containing_cell.value.strip() 
+
+def row_contains_highly_frequent_word(row, high_frequency_words):
+    for word in high_frequency_words:
         try:
             if have_same_root(word, row[0].value):
                 return True
@@ -107,17 +70,51 @@ def row_contains_highly_frequent_word(row):
             pass 
     return False
 
-# Load the Excel file
-wb = load_workbook(MY_WORDSHEET_PATH, read_only=True)
-ws = wb.active  # You can also use wb['SheetName'] if needed
+def get_column_widths(worksheet):
+    column_widths = {}
+    reference_row = 2  # Assuming the second row has the data to determine column widths
+    for cell in worksheet[reference_row]:
+        col_letter = cell.column_letter
+        width = ws.column_dimensions[col_letter].width
+        column_widths[col_letter] = width
+    return column_widths
 
-list1, list2 = [], []
 
+MY_WORDSHEET_PATH = "GRE Word sheet.xlsx"
+NEW_WORDSHEET_PATH = "GRE Word sheet - New.xlsx"
+FREQUENCY_XLSX_PATH = "word_frequencies.xlsx"
+
+wb = load_workbook(FREQUENCY_XLSX_PATH, data_only=True)
+ws = wb.active # first (or only) sheet
+
+frequency_dict = get_frequency_dict_from_worksheet(ws)
+
+
+freq_sorted = sorted(frequency_dict.keys(), reverse=True) # list of frequencies sorted in descending order
+
+buckets = [[] for _ in range(len(freq_sorted) + 1)]  # last one = “no match”
+
+# 3. index words that belong to each frequency for O(1) membership testing
+#    (set lookup is much faster than list lookup)
+freq_word_sets = {f: set(freq_words) for f, freq_words in frequency_dict.items()}
+
+wb = load_workbook(MY_WORDSHEET_PATH)
+ws = wb.active # first (or only) sheet
+
+widths = get_column_widths(ws)  # get column widths to preserve formatting later
+
+# 4. distribute the words
 for row in ws.iter_rows(min_row=2):
-    if row_contains_highly_frequent_word(row):
-        list1.append(row)
-    else:
-        list2.append(row)
+    placed = False
+    for idx, f in enumerate(freq_sorted): 
+        if row_contains_highly_frequent_word(row, freq_word_sets[f]):
+            buckets[idx].append(row)
+            placed = True
+            break
+    if not placed:                                  # fell through → no match
+        buckets[-1].append(row)
+
+flattened = [word for bucket in buckets for word in bucket]
 
 # Create output workbook
 out_wb = Workbook()
@@ -134,7 +131,7 @@ for col_idx, cell in enumerate(header_row, start=1):
         new_cell.number_format = cell.number_format
 
 # Function to copy a row with formatting
-def write_row(out_ws, row_index, source_row):
+def write_row(out_ws, row_index, source_row, ws):
     for col_idx, cell in enumerate(source_row, start=1):
         new_cell = out_ws.cell(row=row_index, column=col_idx, value=cell.value)
         if not isinstance(cell, EmptyCell) and cell.has_style:
@@ -143,12 +140,16 @@ def write_row(out_ws, row_index, source_row):
             new_cell.border = copy(cell.border)
             new_cell.alignment = copy(cell.alignment)
             new_cell.number_format = cell.number_format
+    out_ws.row_dimensions[row_index].height = ws.row_dimensions[row_index].height
 
 # Write list1 then list2 rows
 row_index = 2
-for row in list1 + list2:
-    write_row(out_ws, row_index, row)
+for row in flattened:
+    write_row(out_ws, row_index, row, ws)
     row_index += 1
+
+for col_letter, width in widths.items():
+    ws.column_dimensions[col_letter].width = width
 
 # Save the output
 out_wb.save(NEW_WORDSHEET_PATH)
